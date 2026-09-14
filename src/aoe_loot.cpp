@@ -52,7 +52,9 @@ namespace
      uint32 AddOrStackRegularLoot(
         Loot* mainLoot,
         LootItem const& incomingItem,
-        size_t reservedQuestRows)
+        size_t reservedQuestRows,
+        Player* player,
+        ObjectGuid destSourceGuid)
     {
         ItemTemplate const* itemTemplate =
             sObjectMgr->GetItemTemplate(incomingItem.itemid);
@@ -80,6 +82,14 @@ namespace
             {
                 if (!CanStackRegularLoot(existingItem, incomingItem) ||
                     existingItem.count >= stackLimit)
+                {
+                    continue;
+                }
+
+                // Stacking into a row the looter cannot see would
+                // hide the count from them.
+                if (!existingItem.AllowedForPlayer(
+                        player, destSourceGuid))
                 {
                     continue;
                 }
@@ -211,6 +221,56 @@ namespace
             HasSimpleRegularLootRules(item);
     }
 
+    // Core keys this on the loot owner's group. The looter's group is
+    // the closest we have here.
+    bool AnyEligibleLooter(
+        Player* player,
+        LootItem const& item,
+        ObjectGuid lootSourceGuid)
+    {
+        Group* group = player->GetGroup();
+
+        if (!group)
+            return item.AllowedForPlayer(player, lootSourceGuid);
+
+        for (auto itr = group->GetFirstMember();
+             itr != nullptr;
+             itr = itr->next())
+        {
+            Player* member = itr->GetSource();
+
+            if (member &&
+                item.AllowedForPlayer(member, lootSourceGuid))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    bool HasLootableRowsLeft(Player* player, Loot const* loot)
+    {
+        if (!loot)
+            return false;
+
+        auto isStillTakeable = [&](LootItem const& item)
+        {
+            return !item.is_looted &&
+                AnyEligibleLooter(
+                    player, item, loot->sourceWorldObjectGUID);
+        };
+
+        return std::any_of(
+                loot->items.begin(),
+                loot->items.end(),
+                isStillTakeable) ||
+            std::any_of(
+                loot->quest_items.begin(),
+                loot->quest_items.end(),
+                isStillTakeable);
+    }
+
     void CompactTransferredRegularLoot(Loot* loot)
     {
         if (!loot ||
@@ -338,6 +398,7 @@ bool AOELootServer::CanPacketReceive(WorldSession* session, WorldPacket const& p
             return !c ||
                 c->GetGUID() == targetGuid ||
                 !c->HasDynamicFlag(UNIT_DYNFLAG_LOOTABLE) ||
+                c->loot.loot_type == LOOT_SKINNING ||
                 !player->isAllowedToLoot(c);
         });
 
@@ -406,6 +467,14 @@ bool AOELootServer::CanPacketReceive(WorldSession* session, WorldPacket const& p
             if (!CanSafelySortLootItem(item))
                 continue;
 
+            // The row ends up on the clicked corpse, so it must pass
+            // against that corpse's GUID, not the source's.
+            if (!item.AllowedForPlayer(
+                    player, mainLoot->sourceWorldObjectGUID))
+            {
+                continue;
+            }
+
             regularCandidates.push_back(
                 { creature, i, item });
         }
@@ -425,6 +494,14 @@ bool AOELootServer::CanPacketReceive(WorldSession* session, WorldPacket const& p
                 questItem.follow_loot_rules ||
                 !questItem.conditions.empty() ||
                 questItem.rollWinnerGUID)
+            {
+                continue;
+            }
+
+            // Quest rows go straight to the bag, so they are looted
+            // from the corpse they still sit on.
+            if (!questItem.AllowedForPlayer(
+                    player, loot->sourceWorldObjectGUID))
             {
                 continue;
             }
@@ -537,7 +614,9 @@ bool AOELootServer::CanPacketReceive(WorldSession* session, WorldPacket const& p
         uint32 transferred = AddOrStackRegularLoot(
             mainLoot,
             sourceItem,
-            reservedQuestRows);
+            reservedQuestRows,
+            player,
+            mainLoot->sourceWorldObjectGUID);
 
         // Nothing fit. Leave the complete item on its corpse.
         if (transferred == 0)
@@ -602,8 +681,13 @@ bool AOELootServer::CanPacketReceive(WorldSession* session, WorldPacket const& p
         {
             sourceItem.is_looted = true;
 
-            if (sourceLoot->unlootedCount > 0)
+            // A corpse whose quest loot was never filled for anybody
+            // has uncounted rows.
+            if (sourceItem.is_counted &&
+                sourceLoot->unlootedCount > 0)
+            {
                 --sourceLoot->unlootedCount;
+            }
         }
         else
         {
@@ -623,7 +707,7 @@ bool AOELootServer::CanPacketReceive(WorldSession* session, WorldPacket const& p
 
         CompactTransferredRegularLoot(loot);
 
-        if (!loot->isLooted())
+        if (!loot->isLooted() || HasLootableRowsLeft(player, loot))
             continue;
 
         creature->AllLootRemovedFromCorpse();
