@@ -221,56 +221,6 @@ namespace
             HasSimpleRegularLootRules(item);
     }
 
-    // Core keys this on the loot owner's group. The looter's group is
-    // the closest we have here.
-    bool AnyEligibleLooter(
-        Player* player,
-        LootItem const& item,
-        ObjectGuid lootSourceGuid)
-    {
-        Group* group = player->GetGroup();
-
-        if (!group)
-            return item.AllowedForPlayer(player, lootSourceGuid);
-
-        for (auto itr = group->GetFirstMember();
-             itr != nullptr;
-             itr = itr->next())
-        {
-            Player* member = itr->GetSource();
-
-            if (member &&
-                item.AllowedForPlayer(member, lootSourceGuid))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    bool HasLootableRowsLeft(Player* player, Loot const* loot)
-    {
-        if (!loot)
-            return false;
-
-        auto isStillTakeable = [&](LootItem const& item)
-        {
-            return !item.is_looted &&
-                AnyEligibleLooter(
-                    player, item, loot->sourceWorldObjectGUID);
-        };
-
-        return std::any_of(
-                loot->items.begin(),
-                loot->items.end(),
-                isStillTakeable) ||
-            std::any_of(
-                loot->quest_items.begin(),
-                loot->quest_items.end(),
-                isStillTakeable);
-    }
-
     void CompactTransferredRegularLoot(Loot* loot)
     {
         if (!loot ||
@@ -707,7 +657,7 @@ bool AOELootServer::CanPacketReceive(WorldSession* session, WorldPacket const& p
 
         CompactTransferredRegularLoot(loot);
 
-        if (!loot->isLooted() || HasLootableRowsLeft(player, loot))
+        if (!loot->isLooted())
             continue;
 
         creature->AllLootRemovedFromCorpse();
